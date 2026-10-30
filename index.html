@@ -1,0 +1,264 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFC检查点打卡</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;padding:20px;
+  font-family:Arial,sans-serif;
+  background:#101827;color:#fff
+}
+h1{font-size:25px}
+.card{
+  background:#1b2638;padding:16px;
+  border-radius:14px;margin:14px 0
+}
+button{
+  width:100%;padding:14px;margin-top:9px;
+  border:0;border-radius:9px;
+  background:#61e6bd;color:#10231e;
+  font-size:16px;font-weight:bold
+}
+.secondary{background:#35445b;color:white}
+.item{
+  padding:12px;margin-top:8px;
+  border:1px solid #40506a;border-radius:9px
+}
+.done{border-color:#61e6bd;color:#61e6bd}
+.small{font-size:13px;color:#b9c6d9;line-height:1.6}
+#logs{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+</style>
+</head>
+<body>
+
+<h1>NFC 检查点打卡</h1>
+
+<div class="card">
+  <h3>运行状态</h3>
+  <div id="status">网页启动正常，正在检查 NFC 能力……</div>
+  <p id="progress">已完成 0 / 5 个检查点</p>
+  <button id="scan">开始扫描 NFC</button>
+  <button class="secondary" id="stop">停止扫描</button>
+  <button class="secondary" id="test">模拟 P1 打卡（测试用）</button>
+  <p class="small">
+    标签文本格式：COMBO:P1、COMBO:P2、COMBO:P3、
+    COMBO:P4、COMBO:P5。
+  </p>
+</div>
+
+<div class="card">
+  <h3>检查点</h3>
+  <div id="points"></div>
+</div>
+
+<div class="card">
+  <h3>打卡记录</h3>
+  <div id="logs">暂无记录</div>
+  <button class="secondary" id="export">导出记录</button>
+  <button class="secondary" id="clear">清除记录</button>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+var KEY = "combo_nfc_checkins_v2";
+var names = ["P1","P2","P3","P4","P5"];
+var records = [];
+var reader = null;
+var scanning = false;
+
+function getRecords(){
+  try {
+    var value = localStorage.getItem(KEY);
+    return value ? JSON.parse(value) : [];
+  } catch(e) {
+    return [];
+  }
+}
+
+records = getRecords();
+
+function status(message){
+  document.getElementById("status").textContent = message;
+}
+
+function save(){
+  try {
+    localStorage.setItem(KEY, JSON.stringify(records));
+  } catch(e) {
+    status("本地保存失败：" + e.message);
+  }
+}
+
+function timeText(value){
+  try {
+    return new Date(value).toLocaleString();
+  } catch(e) {
+    return value;
+  }
+}
+
+function render(){
+  var points = document.getElementById("points");
+  var logs = document.getElementById("logs");
+  var done = {};
+
+  records.forEach(function(r){
+    done[r.id] = true;
+  });
+
+  points.textContent = "";
+
+  names.forEach(function(id){
+    var item = document.createElement("div");
+    item.className = "item" + (done[id] ? " done" : "");
+    item.textContent = id + "：" + (done[id] ? "已完成" : "未完成");
+    points.appendChild(item);
+  });
+
+  var count = names.filter(function(id){
+    return !!done[id];
+  }).length;
+
+  document.getElementById("progress").textContent =
+    "已完成 " + count + " / 5 个检查点";
+
+  if(records.length === 0){
+    logs.textContent = "暂无记录";
+  } else {
+    logs.textContent = records.slice().reverse().map(function(r){
+      return timeText(r.time) + " | " + r.id + " | " + r.source;
+    }).join("\n");
+  }
+}
+
+function recordCheckin(id, source){
+  if(names.indexOf(id) === -1){
+    status("无法识别标签，请检查标签内容。");
+    return;
+  }
+
+  records.push({
+    id:id,
+    time:new Date().toISOString(),
+    source:source
+  });
+
+  save();
+  render();
+  status("打卡成功：" + id);
+}
+
+function parseTag(text){
+  var match = String(text || "").toUpperCase()
+    .match(/COMBO\s*:\s*(P[1-5])/);
+
+  if(!match){
+    match = String(text || "").toUpperCase()
+      .match(/\b(P[1-5])\b/);
+  }
+
+  return match ? match[1] : null;
+}
+
+async function startScan(){
+  if(scanning){
+    status("正在扫描，请将手机靠近 NFC 标签。");
+    return;
+  }
+
+  if(!("NDEFReader" in window)){
+    status("当前 WebView 不支持网页 NFC。需要 WebToApp 提供原生 NFC 桥接。");
+    return;
+  }
+
+  try{
+    reader = new NDEFReader();
+
+    reader.onreading = function(event){
+      var result = null;
+      var decoder = new TextDecoder();
+
+      event.message.records.forEach(function(r){
+        if(r.recordType === "text"){
+          var text = decoder.decode(r.data);
+          result = parseTag(text) || result;
+        }
+      });
+
+      if(result){
+        recordCheckin(result,"NFC");
+      } else {
+        status("读取到了标签，但内容不是 COMBO:P1 至 COMBO:P5。");
+      }
+    };
+
+    reader.onreadingerror = function(){
+      status("标签读取失败，请重新靠近标签。");
+    };
+
+    await reader.scan();
+    scanning = true;
+    status("扫描已启动，请靠近 NFC 标签。");
+  }catch(e){
+    status("启动 NFC 失败：" + (e.message || String(e)));
+  }
+}
+
+document.getElementById("scan").onclick = startScan;
+
+document.getElementById("stop").onclick = function(){
+  scanning = false;
+  reader = null;
+  status("已停止扫描。");
+};
+
+document.getElementById("test").onclick = function(){
+  recordCheckin("P1","手动模拟");
+};
+
+document.getElementById("clear").onclick = function(){
+  if(confirm("确定清除所有本地打卡记录吗？")){
+    records = [];
+    save();
+    render();
+    status("记录已清除。");
+  }
+};
+
+document.getElementById("export").onclick = function(){
+  var blob = new Blob(
+    [JSON.stringify(records,null,2)],
+    {type:"application/json;charset=utf-8"}
+  );
+
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "nfc-checkins.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function(){
+    URL.revokeObjectURL(url);
+  },1000);
+};
+
+render();
+
+if("NDEFReader" in window){
+  status("检测到 Web NFC API，可以尝试扫描。");
+} else {
+  status("网页启动正常，但当前环境未提供 Web NFC API。");
+}
+
+})();
+</script>
+
+</body>
+</html>
